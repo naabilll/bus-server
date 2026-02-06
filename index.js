@@ -9,34 +9,39 @@ app.use(cors());
 // --- GLOBAL VARIABLES ---
 const agent = new https.Agent({ rejectUnauthorized: false });
 let CACHED_COOKIE = "";
-let LOGIN_TIMESTAMP = 0; // Tracks when we last logged in
+let LOGIN_TIMESTAMP = 0; 
 let loginPromise = null;
 
-// --- CONFIGURATION ---
-// 15 Minutes (15 * 60 seconds * 1000 milliseconds)
+// 15 Minutes Refresh Timer
 const SESSION_LIFETIME = 15 * 60 * 1000; 
 
-// --- LOGIN FUNCTION (With Time Check) ---
+// --- LOGIN FUNCTION ---
 async function getCookie(forceRefresh = false) {
   const now = Date.now();
 
-  // 1. If we have a cookie, AND it is fresh (less than 15 mins old), AND we aren't forcing a refresh
+  // If cookie is fresh (less than 15 mins old), use it.
   if (CACHED_COOKIE && !forceRefresh && (now - LOGIN_TIMESTAMP < SESSION_LIFETIME)) {
     return CACHED_COOKIE;
   }
 
-  // 2. Prevent multiple users from logging in at the same time
+  // SAFETY FIX: If already logging in, wait, but don't get stuck forever
   if (loginPromise) {
-    console.log("🚦 Waiting for ongoing login...");
-    return await loginPromise;
+    try {
+        return await loginPromise;
+    } catch (e) {
+        // If the previous login failed, we will try again below
+        console.log("⚠️ Previous login attempt failed. Retrying...");
+    }
   }
 
-  console.log(forceRefresh ? "♻️ Cookie Old/Invalid. Refreshing..." : "🔑 Starting Fresh Login (15m Timer Expired)...");
+  // Only log this once every 15 minutes
+  console.log(forceRefresh ? "♻️ Refreshing Session..." : "🔑 Performing Fresh Login...");
   
   loginPromise = (async () => {
     try {
       const res = await axios.get("https://app.bongoiot.com/jsp/quickview.jsp?param=MzQ0OTMwJkJ1cyZFTg==", {
         httpsAgent: agent,
+        timeout: 10000, // SAFETY: Give up after 10 seconds
         headers: { 
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" 
         }
@@ -45,7 +50,7 @@ async function getCookie(forceRefresh = false) {
       const rawCookies = res.headers['set-cookie'];
       if (rawCookies) {
         CACHED_COOKIE = rawCookies.map(c => c.split(';')[0]).join('; ');
-        LOGIN_TIMESTAMP = Date.now(); // Save the time!
+        LOGIN_TIMESTAMP = Date.now(); 
         console.log("✅ Login Success!");
         return CACHED_COOKIE;
       }
@@ -53,7 +58,7 @@ async function getCookie(forceRefresh = false) {
       console.error("❌ Login Failed:", e.message);
       return null;
     } finally {
-      loginPromise = null;
+      loginPromise = null; // SAFETY: Always clear the promise so others can try
     }
   })();
 
@@ -64,7 +69,6 @@ async function getCookie(forceRefresh = false) {
 app.get("/bus-api", async (req, res) => {
   const { id, imei, type } = req.query;
 
-  // Helper function to send data
   const fetchData = async (cookieToUse) => {
     const formData = new URLSearchParams();
     formData.append('user_id', '195425'); 
@@ -81,6 +85,7 @@ app.get("/bus-api", async (req, res) => {
 
     return await axios.post("https://app.bongoiot.com/GenerateJSON?method=getVehicleStatus", formData, {
       httpsAgent: agent,
+      timeout: 10000, // SAFETY: Timeout for data fetch too
       headers: {
         "Cookie": cookieToUse,
         "Content-Type": "application/x-www-form-urlencoded",
@@ -93,18 +98,17 @@ app.get("/bus-api", async (req, res) => {
   };
 
   try {
-    // 1. Get Cookie (Only logs in if 15 mins have passed)
     let cookie = await getCookie();
     if (!cookie) return res.json({ error: "Login failed" });
 
     let response = await fetchData(cookie);
 
-    // 2. Safety Net: If the server STILL rejects us (e.g., they reset the server), Force Login
+    // Auto-Fix Logic
     if (typeof response.data === 'string') {
-        console.log("⚠️ Emergency: Session died early. Force refreshing...");
-        cookie = await getCookie(true); // Force New Login
+        console.log("⚠️ Session expired early. Fixing...");
+        cookie = await getCookie(true); 
         if (cookie) {
-            response = await fetchData(cookie); // Retry
+            response = await fetchData(cookie); 
         }
     }
 
@@ -112,10 +116,9 @@ app.get("/bus-api", async (req, res) => {
 
   } catch (error) {
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
-       // Reset timestamp so next request forces login
        LOGIN_TIMESTAMP = 0; 
     }
-    console.error("Fetch Error:", error.message);
+    // Return empty object on error so map doesn't crash
     res.json({ error: "Fetch Error" });
   }
 });
