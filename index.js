@@ -9,18 +9,29 @@ app.use(cors());
 // --- GLOBAL VARIABLES ---
 const agent = new https.Agent({ rejectUnauthorized: false });
 let CACHED_COOKIE = "";
+let LOGIN_TIMESTAMP = 0; // Tracks when we last logged in
 let loginPromise = null;
 
-// --- LOGIN FUNCTION (Prevents Loops) ---
-async function getCookie() {
-  if (CACHED_COOKIE) return CACHED_COOKIE;
+// --- CONFIGURATION ---
+// 15 Minutes (15 * 60 seconds * 1000 milliseconds)
+const SESSION_LIFETIME = 15 * 60 * 1000; 
 
+// --- LOGIN FUNCTION (With Time Check) ---
+async function getCookie(forceRefresh = false) {
+  const now = Date.now();
+
+  // 1. If we have a cookie, AND it is fresh (less than 15 mins old), AND we aren't forcing a refresh
+  if (CACHED_COOKIE && !forceRefresh && (now - LOGIN_TIMESTAMP < SESSION_LIFETIME)) {
+    return CACHED_COOKIE;
+  }
+
+  // 2. Prevent multiple users from logging in at the same time
   if (loginPromise) {
     console.log("🚦 Waiting for ongoing login...");
     return await loginPromise;
   }
 
-  console.log("🔑 Starting Login...");
+  console.log(forceRefresh ? "♻️ Cookie Old/Invalid. Refreshing..." : "🔑 Starting Fresh Login (15m Timer Expired)...");
   
   loginPromise = (async () => {
     try {
@@ -34,6 +45,7 @@ async function getCookie() {
       const rawCookies = res.headers['set-cookie'];
       if (rawCookies) {
         CACHED_COOKIE = rawCookies.map(c => c.split(';')[0]).join('; ');
+        LOGIN_TIMESTAMP = Date.now(); // Save the time!
         console.log("✅ Login Success!");
         return CACHED_COOKIE;
       }
@@ -48,11 +60,11 @@ async function getCookie() {
   return await loginPromise;
 }
 
-// --- API ROUTE (WITH AUTO-FIX LOGIC) ---
+// --- API ROUTE ---
 app.get("/bus-api", async (req, res) => {
   const { id, imei, type } = req.query;
 
-  // 1. Prepare Data Function
+  // Helper function to send data
   const fetchData = async (cookieToUse) => {
     const formData = new URLSearchParams();
     formData.append('user_id', '195425'); 
@@ -81,32 +93,27 @@ app.get("/bus-api", async (req, res) => {
   };
 
   try {
-    // Attempt 1: Try with current cookie
+    // 1. Get Cookie (Only logs in if 15 mins have passed)
     let cookie = await getCookie();
     if (!cookie) return res.json({ error: "Login failed" });
 
     let response = await fetchData(cookie);
 
-    // --- SELF HEALING LOGIC ---
-    // If response is a String (HTML Login Page) instead of JSON Object
+    // 2. Safety Net: If the server STILL rejects us (e.g., they reset the server), Force Login
     if (typeof response.data === 'string') {
-        console.log("⚠️ Session Expired (Received HTML). Refreshing login...");
-        
-        CACHED_COOKIE = ""; // 1. Clear dead cookie
-        cookie = await getCookie(); // 2. Get fresh cookie
-        
+        console.log("⚠️ Emergency: Session died early. Force refreshing...");
+        cookie = await getCookie(true); // Force New Login
         if (cookie) {
-            console.log("🔄 Retrying with fresh cookie...");
-            response = await fetchData(cookie); // 3. Retry request
+            response = await fetchData(cookie); // Retry
         }
     }
 
     res.json(response.data);
 
   } catch (error) {
-    // Also handle standard error codes
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
-       CACHED_COOKIE = ""; 
+       // Reset timestamp so next request forces login
+       LOGIN_TIMESTAMP = 0; 
     }
     console.error("Fetch Error:", error.message);
     res.json({ error: "Fetch Error" });
