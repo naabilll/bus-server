@@ -6,19 +6,21 @@ const app = express();
 
 app.use(cors());
 
+// --- GLOBAL VARIABLES ---
 const agent = new https.Agent({ rejectUnauthorized: false });
 let CACHED_COOKIE = "";
 let loginPromise = null;
 
-// --- YOUR LOGIN FUNCTION (With 20-Min Auto-Clean) ---
+// --- MEMORY CACHE (The Crowd Safety Feature) ---
+// Stores bus data so we don't spam the main server
+const BUS_CACHE = {}; 
+
+// --- LOGIN FUNCTION ---
 async function getCookie() {
   if (CACHED_COOKIE) return CACHED_COOKIE;
+  if (loginPromise) return await loginPromise;
 
-  if (loginPromise) {
-    return await loginPromise;
-  }
-
-  // console.log("🔑 Starting Login..."); // Commented out to reduce logs
+  // console.log("🔑 Starting Login..."); 
   
   loginPromise = (async () => {
     try {
@@ -34,11 +36,8 @@ async function getCookie() {
         CACHED_COOKIE = rawCookies.map(c => c.split(';')[0]).join('; ');
         console.log("✅ Login Success!");
 
-        // --- THE MAGIC FIX: 20 MINUTE TIMER ---
-        // Clears the cache silently in the background. No manual deploy needed.
-        setTimeout(() => {
-            CACHED_COOKIE = ""; 
-        }, 20 * 60 * 1000); 
+        // Auto-Clear Session every 20 mins to prevent "4-Hour Bug"
+        setTimeout(() => { CACHED_COOKIE = ""; }, 20 * 60 * 1000); 
 
         return CACHED_COOKIE;
       }
@@ -55,8 +54,19 @@ async function getCookie() {
 
 app.get("/bus-api", async (req, res) => {
   const { id, imei, type } = req.query;
-  const cookie = await getCookie();
+
+  // --- 1. CHECK CACHE FIRST ---
+  // If we fetched this bus less than 3 seconds ago, return the saved data.
+  // This means 100 users = 1 Request to BongoIoT.
+  const cacheKey = `${id}`;
+  const now = Date.now();
   
+  if (BUS_CACHE[cacheKey] && (now - BUS_CACHE[cacheKey].timestamp < 3000)) {
+      return res.json(BUS_CACHE[cacheKey].data);
+  }
+
+  // --- 2. FETCH NEW DATA (If cache is old) ---
+  const cookie = await getCookie();
   if (!cookie) return res.json({ error: "Login failed" });
 
   const formData = new URLSearchParams();
@@ -87,6 +97,13 @@ app.get("/bus-api", async (req, res) => {
 
     if (typeof response.data === 'string') {
         CACHED_COOKIE = ""; // Auto-fix if session dies
+    } else {
+        // --- 3. SAVE TO CACHE ---
+        // Save this result for 3 seconds so other users can use it
+        BUS_CACHE[cacheKey] = {
+            data: response.data,
+            timestamp: Date.now()
+        };
     }
 
     res.json(response.data);
