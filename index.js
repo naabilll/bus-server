@@ -6,21 +6,19 @@ const app = express();
 
 app.use(cors());
 
-// --- GLOBAL VARIABLES ---
 const agent = new https.Agent({ rejectUnauthorized: false });
 let CACHED_COOKIE = "";
 let loginPromise = null;
 
-// --- LOGIN FUNCTION ---
+// --- YOUR LOGIN FUNCTION (With 20-Min Auto-Clean) ---
 async function getCookie() {
   if (CACHED_COOKIE) return CACHED_COOKIE;
 
   if (loginPromise) {
-    console.log("🚦 Waiting for ongoing login...");
     return await loginPromise;
   }
 
-  console.log("🔑 Starting Fresh Login...");
+  // console.log("🔑 Starting Login..."); // Commented out to reduce logs
   
   loginPromise = (async () => {
     try {
@@ -36,11 +34,11 @@ async function getCookie() {
         CACHED_COOKIE = rawCookies.map(c => c.split(';')[0]).join('; ');
         console.log("✅ Login Success!");
 
-        // --- TIMER: CLEAR CACHE EVERY 2 MINUTES ---
+        // --- THE MAGIC FIX: 20 MINUTE TIMER ---
+        // Clears the cache silently in the background. No manual deploy needed.
         setTimeout(() => {
-            console.log("⏰ 2 Minutes Passed: Clearing cache for safety.");
             CACHED_COOKIE = ""; 
-        }, 2 * 60 * 1000); // 2 Minutes (User Requested)
+        }, 20 * 60 * 1000); 
 
         return CACHED_COOKIE;
       }
@@ -55,7 +53,6 @@ async function getCookie() {
   return await loginPromise;
 }
 
-// --- API ROUTE ---
 app.get("/bus-api", async (req, res) => {
   const { id, imei, type } = req.query;
   const cookie = await getCookie();
@@ -88,18 +85,15 @@ app.get("/bus-api", async (req, res) => {
       }
     });
 
-    // SAFETY CHECK: If the server returns HTML (Login Page) instead of JSON
-    // We clear the cache immediately so the NEXT request works.
     if (typeof response.data === 'string') {
-        console.log("⚠️ Session died early. Clearing cache.");
-        CACHED_COOKIE = ""; 
+        CACHED_COOKIE = ""; // Auto-fix if session dies
     }
 
     res.json(response.data);
 
   } catch (error) {
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
-       CACHED_COOKIE = ""; // Force re-login next time
+       CACHED_COOKIE = ""; 
     }
     res.json({ error: "Fetch Error" });
   }
