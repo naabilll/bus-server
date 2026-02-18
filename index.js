@@ -14,15 +14,17 @@ let loginPromise = null;
 // --- MEMORY CACHE ---
 const BUS_CACHE = {}; 
 
+// --- HELPER: PAUSE FUNCTION ---
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 // --- LOGIN FUNCTION ---
 async function getCookie() {
   if (CACHED_COOKIE) return CACHED_COOKIE;
-  
-  // If a login is already happening, wait for it instead of starting a new one
   if (loginPromise) return await loginPromise;
 
   loginPromise = (async () => {
     try {
+      console.log("🔑 Authenticating with BongoIoT...");
       const res = await axios.get("https://app.bongoiot.com/jsp/quickview.jsp?param=MzQ0OTMwJkJ1cyZFTg==", {
         httpsAgent: agent,
         headers: { 
@@ -33,11 +35,13 @@ async function getCookie() {
       const rawCookies = res.headers['set-cookie'];
       if (rawCookies) {
         CACHED_COOKIE = rawCookies.map(c => c.split(';')[0]).join('; ');
-        console.log("✅ Login Success!");
+        console.log("✅ Login Success! (Waiting 500ms for session to sync...)");
         
-        // Auto-Clear Session every 20 mins to prevent "4-Hour Bug"
-        setTimeout(() => { CACHED_COOKIE = ""; }, 20 * 60 * 1000); 
+        // CRITICAL FIX: Wait 500ms for the session to register on their end
+        await sleep(500);
 
+        // Auto-Clear Session every 20 mins
+        setTimeout(() => { CACHED_COOKIE = ""; }, 20 * 60 * 1000); 
         return CACHED_COOKIE;
       }
     } catch (e) {
@@ -52,13 +56,10 @@ async function getCookie() {
 
 app.get("/bus-api", async (req, res) => {
   const { id, imei, type } = req.query;
-
-  // --- 1. CHECK CACHE FIRST ---
   const cacheKey = `${id}`;
   const now = Date.now();
-  
-  // 🔥 FIX: Set to 5000 (5 Seconds). 
-  // This reduces server load by ~50% compared to your old 3s cache.
+
+  // --- 1. CHECK CACHE (5 Seconds) ---
   if (BUS_CACHE[cacheKey] && (now - BUS_CACHE[cacheKey].timestamp < 5000)) {
       return res.json(BUS_CACHE[cacheKey].data);
   }
@@ -93,18 +94,21 @@ app.get("/bus-api", async (req, res) => {
       }
     });
 
+    // CHECK RESPONSE
     if (typeof response.data === 'string') {
-        // If Response is a string, it usually means Session Expired or Error.
-        // We CLEAR the cookie so it re-logs in next time.
-        // We do NOT cache this error.
-        CACHED_COOKIE = ""; 
+        // Only clear cookie if it's a short error string (likely HTML error)
+        if(response.data.length < 500) {
+            console.log("⚠️ Session Error. Clearing Cookie.");
+            CACHED_COOKIE = ""; 
+        }
+        
+        // FAIL-SAFE: If we have old data, return it instead of "0 Buses"
+        if (BUS_CACHE[cacheKey]) {
+            return res.json(BUS_CACHE[cacheKey].data);
+        }
     } else {
-        // If Response is an Object (JSON), it is valid data.
-        // We CACHE this for 5 seconds.
-        BUS_CACHE[cacheKey] = {
-            data: response.data,
-            timestamp: Date.now()
-        };
+        // SUCCESS
+        BUS_CACHE[cacheKey] = { data: response.data, timestamp: Date.now() };
     }
     
     res.json(response.data);
@@ -112,6 +116,10 @@ app.get("/bus-api", async (req, res) => {
   } catch (error) {
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
        CACHED_COOKIE = ""; 
+    }
+    // Network error? Return old data
+    if (BUS_CACHE[cacheKey]) {
+        return res.json(BUS_CACHE[cacheKey].data);
     }
     res.json({ error: "Fetch Error" });
   }
