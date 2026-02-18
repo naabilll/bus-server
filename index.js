@@ -6,19 +6,22 @@ const app = express();
 
 app.use(cors());
 
-// --- GLOBAL VARIABLES ---
+// --- CONFIGURATION ---
 const agent = new https.Agent({ rejectUnauthorized: false });
 let CACHED_COOKIE = "";
 let loginPromise = null;
 
 // --- MEMORY CACHE ---
 const BUS_CACHE = {}; 
+const CACHE_DURATION = 5000; // 5 Seconds Cache
 
 // --- LOGIN FUNCTION ---
 async function getCookie() {
   if (CACHED_COOKIE) return CACHED_COOKIE;
   if (loginPromise) return await loginPromise;
 
+  console.log("🔑 Logging in to BongoIoT...");
+  
   loginPromise = (async () => {
     try {
       const res = await axios.get("https://app.bongoiot.com/jsp/quickview.jsp?param=MzQ0OTMwJkJ1cyZFTg==", {
@@ -33,8 +36,12 @@ async function getCookie() {
         CACHED_COOKIE = rawCookies.map(c => c.split(';')[0]).join('; ');
         console.log("✅ Login Success!");
         
-        // Auto-Clear Session every 20 mins to prevent "4-Hour Bug"
-        setTimeout(() => { CACHED_COOKIE = ""; }, 20 * 60 * 1000); 
+        // Force refresh session every 20 mins
+        setTimeout(() => { 
+            console.log("🔄 Refreshing Session...");
+            CACHED_COOKIE = ""; 
+        }, 20 * 60 * 1000); 
+        
         return CACHED_COOKIE;
       }
     } catch (e) {
@@ -49,17 +56,15 @@ async function getCookie() {
 
 app.get("/bus-api", async (req, res) => {
   const { id, imei, type } = req.query;
-
-  // --- 1. CHECK CACHE FIRST (Modified to 5 Seconds) ---
   const cacheKey = `${id}`;
   const now = Date.now();
 
-  // CHANGE: 3000 -> 5000 (5 Seconds)
-  if (BUS_CACHE[cacheKey] && (now - BUS_CACHE[cacheKey].timestamp < 5000)) {
+  // 1. SERVE CACHE IF FRESH (5s)
+  if (BUS_CACHE[cacheKey] && (now - BUS_CACHE[cacheKey].timestamp < CACHE_DURATION)) {
       return res.json(BUS_CACHE[cacheKey].data);
   }
 
-  // --- 2. FETCH NEW DATA ---
+  // 2. FETCH NEW DATA
   const cookie = await getCookie();
   if (!cookie) return res.json({ error: "Login failed" });
 
@@ -78,20 +83,33 @@ app.get("/bus-api", async (req, res) => {
       headers: { "Cookie": cookie }
     });
 
-    if (typeof response.data === 'string') {
-        CACHED_COOKIE = ""; // Auto-fix if session dies
-    } else {
-        // --- 3. SAVE TO CACHE ---
-        BUS_CACHE[cacheKey] = { 
-            data: response.data, 
-            timestamp: Date.now() 
-        };
-    }
+    // --- CRITICAL FIX: HANDLE INVALID RESPONSES ---
+    // If response is a string (HTML error) or empty, DO NOT send it.
+    if (typeof response.data === 'string' || !response.data) {
+        console.log(`⚠️ Invalid Data for Bus ${id}. Resetting Cookie.`);
+        CACHED_COOKIE = ""; // Force re-login
+        
+        // FALLBACK: Return old cached data so bus doesn't disappear
+        if (BUS_CACHE[cacheKey]) {
+            return res.json(BUS_CACHE[cacheKey].data);
+        }
+        return res.json({ error: "Invalid Data" }); // Safe exit
+    } 
+    
+    // SUCCESS: Data is valid JSON
+    // Update Cache
+    BUS_CACHE[cacheKey] = { data: response.data, timestamp: Date.now() };
     res.json(response.data);
 
   } catch (error) {
+    // Handle 401/403 Errors
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
        CACHED_COOKIE = ""; 
+    }
+    
+    // FALLBACK: Return old data if fetch fails
+    if (BUS_CACHE[cacheKey]) {
+        return res.json(BUS_CACHE[cacheKey].data);
     }
     res.json({ error: "Fetch Error" });
   }
