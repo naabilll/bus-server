@@ -6,18 +6,13 @@ const app = express();
 
 app.use(cors());
 
-// --- GLOBAL CONFIGURATION ---
+// --- GLOBAL VARIABLES ---
 const agent = new https.Agent({ rejectUnauthorized: false });
 let CACHED_COOKIE = "";
 let loginPromise = null;
 
 // --- MEMORY CACHE ---
 const BUS_CACHE = {}; 
-
-// --- CONFIG: CACHE DURATION ---
-// FLAT 5 Seconds for everything. 
-// No 20s delay. Fast updates for everyone.
-const CACHE_DURATION = 5000; 
 
 // --- LOGIN FUNCTION ---
 async function getCookie() {
@@ -37,6 +32,8 @@ async function getCookie() {
       if (rawCookies) {
         CACHED_COOKIE = rawCookies.map(c => c.split(';')[0]).join('; ');
         console.log("✅ Login Success!");
+        
+        // Auto-Clear Session every 20 mins to prevent "4-Hour Bug"
         setTimeout(() => { CACHED_COOKIE = ""; }, 20 * 60 * 1000); 
         return CACHED_COOKIE;
       }
@@ -52,16 +49,17 @@ async function getCookie() {
 
 app.get("/bus-api", async (req, res) => {
   const { id, imei, type } = req.query;
+
+  // --- 1. CHECK CACHE FIRST (Modified to 5 Seconds) ---
   const cacheKey = `${id}`;
   const now = Date.now();
 
-  // --- CHECK CACHE (Simple & Fast) ---
-  // If we have data younger than 5 seconds, return it immediately.
-  if (BUS_CACHE[cacheKey] && (now - BUS_CACHE[cacheKey].timestamp < CACHE_DURATION)) {
+  // CHANGE: 3000 -> 5000 (5 Seconds)
+  if (BUS_CACHE[cacheKey] && (now - BUS_CACHE[cacheKey].timestamp < 5000)) {
       return res.json(BUS_CACHE[cacheKey].data);
   }
 
-  // --- FETCH NEW DATA ---
+  // --- 2. FETCH NEW DATA ---
   const cookie = await getCookie();
   if (!cookie) return res.json({ error: "Login failed" });
 
@@ -81,12 +79,13 @@ app.get("/bus-api", async (req, res) => {
     });
 
     if (typeof response.data === 'string') {
-        CACHED_COOKIE = ""; 
-        // If session died, try to return old data to keep UI alive
-        if (BUS_CACHE[cacheKey]) return res.json(BUS_CACHE[cacheKey].data);
+        CACHED_COOKIE = ""; // Auto-fix if session dies
     } else {
-        // Save new data
-        BUS_CACHE[cacheKey] = { data: response.data, timestamp: Date.now() };
+        // --- 3. SAVE TO CACHE ---
+        BUS_CACHE[cacheKey] = { 
+            data: response.data, 
+            timestamp: Date.now() 
+        };
     }
     res.json(response.data);
 
@@ -94,8 +93,6 @@ app.get("/bus-api", async (req, res) => {
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
        CACHED_COOKIE = ""; 
     }
-    // Fail-safe: Return old data if fetch fails
-    if (BUS_CACHE[cacheKey]) return res.json(BUS_CACHE[cacheKey].data);
     res.json({ error: "Fetch Error" });
   }
 });
