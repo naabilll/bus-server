@@ -161,10 +161,12 @@ app.get("/heal", async (req, res) => {
 
         try {
             const response = await axios.post("https://app.bongoiot.com/GenerateJSON?method=getVehicleStatus", formData.toString(), {
-                httpsAgent: agent, headers: { "Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded" }
+                httpsAgent: agent, 
+                timeout: 3000, // STRICT TIMEOUT applied
+                headers: { "Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded" }
             });
             const text = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
-            return text.includes(expectedImei); // Strict IMEI verification!
+            return text.includes(expectedImei); 
         } catch (e) { return false; }
     }
 
@@ -175,7 +177,8 @@ app.get("/heal", async (req, res) => {
 
     // Checks 5000 IDs back and 15000 IDs forward
     for(let i = parseInt(baseBus.id) - 5000; i < parseInt(baseBus.id) + 15000; i++) {
-        if(i % 500 === 0) res.write(`<span style="color:#64748b;">Scanning past ${i}...</span><br>`);
+        // Fast status print (every 50 loops) so you don't stare at a blank screen
+        if(i % 50 === 0) res.write(`<span style="color:#64748b;">Scanning past ${i}...</span><br>`);
         if (await verifyId(i, baseBus.imei)) {
             offset = i - parseInt(baseBus.id); found = true;
             res.write(`<span style="color:#22c55e;">✅ Anchor Found! Database Offset is ${offset > 0 ? '+' : ''}${offset}</span><br><br>`);
