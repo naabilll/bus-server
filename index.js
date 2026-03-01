@@ -2,9 +2,15 @@ const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
 const https = require("https");
+const { URLSearchParams } = require("url");
 
 const app = express();
 app.use(cors());
+
+// --- TELEGRAM ALERT CONFIG ---
+const TELEGRAM_BOT_TOKEN = "8553326700:AAFZtZmaWuRILrNuZVCsHudGKDC5xvNgVEo";
+const TELEGRAM_CHAT_ID = "1139897568";
+let lastAlertTime = 0; // Tracks cooldown to prevent spam
 
 // --- GLOBAL VARIABLES ---
 const agent = new https.Agent({ rejectUnauthorized: false });
@@ -33,7 +39,6 @@ async function getCookie() {
         CACHED_COOKIE = rawCookies.map(c => c.split(';')[0]).join('; ');
         console.log("✅ Login Success!");
         
-        // Auto-Clear Session every 20 mins
         setTimeout(() => { CACHED_COOKIE = ""; }, 20 * 60 * 1000); 
 
         return CACHED_COOKIE;
@@ -52,7 +57,6 @@ async function getCookie() {
 app.get("/bus-api", async (req, res) => {
   const { id, imei, type } = req.query;
 
-  // --- 1. CHECK CACHE FIRST ---
   const cacheKey = `${id}`;
   const now = Date.now();
   
@@ -60,7 +64,6 @@ app.get("/bus-api", async (req, res) => {
       return res.json(BUS_CACHE[cacheKey].data);
   }
 
-  // --- 2. FETCH NEW DATA ---
   const cookie = await getCookie();
   if (!cookie) return res.json({ error: "Login failed" });
 
@@ -91,27 +94,56 @@ app.get("/bus-api", async (req, res) => {
     });
 
     if (typeof response.data === 'string') {
-        CACHED_COOKIE = ""; // Session died
-        // FAIL-SAFE: Return old data if session dies
+        CACHED_COOKIE = ""; 
         if (BUS_CACHE[cacheKey]) return res.json(BUS_CACHE[cacheKey].data);
     } else {
-        // SUCCESS: Save to Cache
-        BUS_CACHE[cacheKey] = {
-            data: response.data,
-            timestamp: Date.now()
-        };
+        BUS_CACHE[cacheKey] = { data: response.data, timestamp: Date.now() };
     }
-    
     res.json(response.data);
 
   } catch (error) {
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
        CACHED_COOKIE = ""; 
     }
-    // FAIL-SAFE: Return old data on network error
     if (BUS_CACHE[cacheKey]) return res.json(BUS_CACHE[cacheKey].data);
-    
     res.json({ error: "Fetch Error" });
+  }
+});
+
+// --- TELEGRAM ALERT ENDPOINT ---
+app.get("/send-alert", async (req, res) => {
+  const now = Date.now();
+
+  // 1. Anti-Spam Check (1 Hour = 3600000 ms)
+  if (now - lastAlertTime < 3600000) {
+    console.log("⚠️ Alert skipped: 1-Hour Cooldown active.");
+    return res.json({ status: "ignored", reason: "cooldown" });
+  }
+
+  // 2. Time Check (Dhaka Time)
+  const dhakaTime = new Date(new Date().toLocaleString("en-US", {timeZone: "Asia/Dhaka"}));
+  const h = dhakaTime.getHours();
+  const m = dhakaTime.getMinutes();
+
+  // Silence period: 9:00 PM (21:00) to 7:30 AM (07:30)
+  const isNight = (h >= 21) || (h < 7) || (h === 7 && m < 30);
+  if (isNight) {
+    console.log("🌙 Alert skipped: Nighttime silence active.");
+    return res.json({ status: "ignored", reason: "night_time" });
+  }
+
+  // 3. Send Telegram Message
+  try {
+    const message = "🚨 BUFT Tracker Alert: 0 active buses detected after 30 seconds! The BongoIOT IDs may have changed, or the system is down.";
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${encodeURIComponent(message)}`;
+    
+    await axios.get(url);
+    lastAlertTime = now; // Start the 1-hour cooldown timer
+    console.log("🚨 Telegram Alert Sent Successfully!");
+    res.json({ status: "success", message: "Alert sent." });
+  } catch (error) {
+    console.error("❌ Telegram Alert Failed:", error.message);
+    res.json({ status: "error", message: "Failed to send alert." });
   }
 });
 
