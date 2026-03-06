@@ -8,13 +8,11 @@ const app = express();
 app.use(cors());
 
 // --- SECURE TELEGRAM CONFIG ---
-// Grabs tokens securely from Render Environment Variables
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 let lastAlertTime = 0; 
 
-// --- MASTER BUS DATABASE ---
-// Moved here so public users cannot scrape IMEI numbers
+// --- MASTER BUS DATABASE (HIDDEN FROM PUBLIC) ---
 const BUSES = [
     { name: "Bus 1: Islampur", id: "351072", imei: "863051061903687" },
     { name: "Bus 2: Shia Masjid", id: "351073", imei: "863051061866041" },
@@ -66,10 +64,10 @@ async function getCookie() {
   return await loginPromise;
 }
 
-// --- NEW EFFICIENT BATCH ENDPOINT ---
+// --- HIGH PERFORMANCE BATCH ENDPOINT ---
 app.get("/fleet", async (req, res) => {
     const now = Date.now();
-    // Return cached fleet if less than 4 seconds old (saves massive server load)
+    // Use 4-second cache to prevent server overload
     if (masterFleetCache.data.length > 0 && (now - masterFleetCache.timestamp < 4000)) {
         return res.json(masterFleetCache.data);
     }
@@ -91,7 +89,6 @@ app.get("/fleet", async (req, res) => {
             });
 
             if (typeof response.data === 'string') {
-                // Safely evaluate poorly formatted BongoJSON
                 let data;
                 try { data = new Function("return " + response.data)(); } catch(e) { return null; }
                 
@@ -104,7 +101,6 @@ app.get("/fleet", async (req, res) => {
                             dName = dObj.name || "--"; dPhone = dObj.mobile_no || "--";
                         } catch(e){}
                     }
-                    // Normalize the data perfectly for the frontend
                     return {
                         id: bus.id, name: bus.name, 
                         lat: parseFloat(info.latitude) || 0, lng: parseFloat(info.longitude) || 0,
@@ -118,7 +114,6 @@ app.get("/fleet", async (req, res) => {
             return null;
         });
 
-        // Wait for all 26 buses to resolve at exactly the same time
         const results = await Promise.all(fetchPromises);
         const cleanData = results.filter(b => b !== null);
         
@@ -141,7 +136,7 @@ app.get("/send-alert", async (req, res) => {
   
   if (isNight) return res.json({ status: "ignored", reason: "night_time" });
 
-  if (!TELEGRAM_BOT_TOKEN) return res.json({status: "error", reason: "No env variable set"});
+  if (!TELEGRAM_BOT_TOKEN) return res.json({status: "error", reason: "No token set"});
 
   try {
     const message = "🚨 BUFT Tracker Alert: 0 active buses detected after 10 seconds! The BongoIOT IDs may have changed.";
