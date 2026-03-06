@@ -7,145 +7,150 @@ const { URLSearchParams } = require("url");
 const app = express();
 app.use(cors());
 
-// --- TELEGRAM ALERT CONFIG ---
-const TELEGRAM_BOT_TOKEN = "8553326700:AAFZtZmaWuRILrNuZVCsHudGKDC5xvNgVEo";
-const TELEGRAM_CHAT_ID = "1139897568";
-let lastAlertTime = 0; // Tracks cooldown to prevent spam
+// --- SECURE TELEGRAM CONFIG ---
+// Grabs tokens securely from Render Environment Variables
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+let lastAlertTime = 0; 
 
-// --- GLOBAL VARIABLES ---
+// --- MASTER BUS DATABASE ---
+// Moved here so public users cannot scrape IMEI numbers
+const BUSES = [
+    { name: "Bus 1: Islampur", id: "351072", imei: "863051061903687" },
+    { name: "Bus 2: Shia Masjid", id: "351073", imei: "863051061866041" },
+    { name: "Bus 3: Azampur", id: "351074", imei: "863051061865993" },
+    { name: "Bus 4: Azampur", id: "351075", imei: "863051061875091" },
+    { name: "Bus 5: Pubail", id: "351076", imei: "863051061778279" },
+    { name: "Bus 6: Girls Hostel", id: "351077", imei: "863051061741285" },
+    { name: "Bus 7: Stop", id: "351079", imei: "863051061737937" },
+    { name: "Bus 8: Azampur", id: "351080", imei: "863051062003073" },
+    { name: "Bus 9: Rampura", id: "351081", imei: "863051062002752" },
+    { name: "Bus 10: Azampur", id: "351082", imei: "863051062003610" },
+    { name: "Bus 11: Kalshi", id: "351083", imei: "863051061786785" },
+    { name: "Bus 12: Tongi", id: "351084", imei: "863051061778220" },
+    { name: "Bus 13: Zirani", id: "351085", imei: "863051062002935" },
+    { name: "Bus 14: Kamlapur", id: "351086", imei: "863051061866694" },
+    { name: "Bus 15: Shibbari", id: "351087", imei: "868184062272516" },
+    { name: "Bus 16: Mirpur-10", id: "351088", imei: "863051061741137" },
+    { name: "Bus 17: Commerce", id: "351089", imei: "868184062144723" },
+    { name: "Bus 18: Pallibiduth", id: "351090", imei: "863051061982632" },
+    { name: "Bus 23: Gulistan", id: "351091", imei: "863051062003990" },
+    { name: "Bus 24: Mirpur-14", id: "351092", imei: "863051061998133" },
+    { name: "Bus 25: Newmarket", id: "351650", imei: "863051061775770" },
+    { name: "Bus 26: Shafipur", id: "351093", imei: "863051061778014" },
+    { name: "BRTC 01", id: "351094", imei: "863051061867940" },
+    { name: "BRTC 02", id: "351095", imei: "863051062002919" },
+    { name: "BRTC 03", id: "351096", imei: "863051061786629" },
+    { name: "BRTC 04", id: "351097", imei: "863051061998075" }
+];
+
 const agent = new https.Agent({ rejectUnauthorized: false });
 let CACHED_COOKIE = "";
 let loginPromise = null;
+let masterFleetCache = { data: [], timestamp: 0 };
 
-// --- MEMORY CACHE ---
-const BUS_CACHE = {}; 
-
-// --- LOGIN FUNCTION ---
 async function getCookie() {
   if (CACHED_COOKIE) return CACHED_COOKIE;
   if (loginPromise) return await loginPromise;
-
   loginPromise = (async () => {
     try {
-      const res = await axios.get("https://app.bongoiot.com/jsp/quickview.jsp?param=MzQ0OTMwJkJ1cyZFTg==", {
-        httpsAgent: agent,
-        headers: { 
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" 
-        }
-      });
-
+      const res = await axios.get("https://app.bongoiot.com/jsp/quickview.jsp?param=MzQ0OTMwJkJ1cyZFTg==", { httpsAgent: agent });
       const rawCookies = res.headers['set-cookie'];
       if (rawCookies) {
         CACHED_COOKIE = rawCookies.map(c => c.split(';')[0]).join('; ');
-        console.log("✅ Login Success!");
-        
         setTimeout(() => { CACHED_COOKIE = ""; }, 20 * 60 * 1000); 
-
         return CACHED_COOKIE;
       }
-    } catch (e) {
-      console.error("❌ Login Failed:", e.message);
-      return null;
-    } finally {
-      loginPromise = null;
-    }
+    } catch (e) { return null; } finally { loginPromise = null; }
   })();
   return await loginPromise;
 }
 
-// --- MAIN API ENDPOINT ---
-app.get("/bus-api", async (req, res) => {
-  const { id, imei, type } = req.query;
-
-  const cacheKey = `${id}`;
-  const now = Date.now();
-  
-  if (BUS_CACHE[cacheKey] && (now - BUS_CACHE[cacheKey].timestamp < 5000)) {
-      return res.json(BUS_CACHE[cacheKey].data);
-  }
-
-  const cookie = await getCookie();
-  if (!cookie) return res.json({ error: "Login failed" });
-
-  const formData = new URLSearchParams();
-  formData.append('user_id', '195425'); 
-  formData.append('project_id', '37');
-  formData.append('javaclassmethodname', 'getVehicleStatus');
-  formData.append('javaclassname', 'com.uffizio.tools.projectmanager.GenerateJSONAjax');
-  formData.append('userDateTimeFormat', 'dd-MM-yyyy hh:mm:ss a');
-  formData.append('timezone', '-360');
-  formData.append('lInActiveTolrance', '0');
-  formData.append('Flag', '');
-  formData.append('link_id', id);
-  formData.append('sImeiNo', imei);
-  formData.append('vehicleType', type || 'Bus');
-
-  try {
-    const response = await axios.post("https://app.bongoiot.com/GenerateJSON?method=getVehicleStatus", formData.toString(), {
-      httpsAgent: agent,
-      headers: {
-        "Cookie": cookie,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "X-Requested-With": "XMLHttpRequest",
-        "Origin": "https://app.bongoiot.com",
-        "Referer": "https://app.bongoiot.com/jsp/quickview.jsp"
-      }
-    });
-
-    if (typeof response.data === 'string') {
-        CACHED_COOKIE = ""; 
-        if (BUS_CACHE[cacheKey]) return res.json(BUS_CACHE[cacheKey].data);
-    } else {
-        BUS_CACHE[cacheKey] = { data: response.data, timestamp: Date.now() };
+// --- NEW EFFICIENT BATCH ENDPOINT ---
+app.get("/fleet", async (req, res) => {
+    const now = Date.now();
+    // Return cached fleet if less than 4 seconds old (saves massive server load)
+    if (masterFleetCache.data.length > 0 && (now - masterFleetCache.timestamp < 4000)) {
+        return res.json(masterFleetCache.data);
     }
-    res.json(response.data);
 
-  } catch (error) {
-    if (error.response && (error.response.status === 401 || error.response.status === 403)) {
-       CACHED_COOKIE = ""; 
+    const cookie = await getCookie();
+    if (!cookie) return res.status(500).json({ error: "Login failed" });
+
+    try {
+        const fetchPromises = BUSES.map(async (bus) => {
+            const formData = new URLSearchParams();
+            formData.append('user_id', '195425'); formData.append('project_id', '37');
+            formData.append('javaclassmethodname', 'getVehicleStatus'); formData.append('javaclassname', 'com.uffizio.tools.projectmanager.GenerateJSONAjax');
+            formData.append('userDateTimeFormat', 'dd-MM-yyyy hh:mm:ss a'); formData.append('timezone', '-360');
+            formData.append('lInActiveTolrance', '0'); formData.append('link_id', bus.id);
+            formData.append('sImeiNo', bus.imei); formData.append('vehicleType', 'Bus');
+
+            const response = await axios.post("https://app.bongoiot.com/GenerateJSON?method=getVehicleStatus", formData.toString(), {
+                httpsAgent: agent, headers: { "Cookie": cookie, "Content-Type": "application/x-www-form-urlencoded" }
+            });
+
+            if (typeof response.data === 'string') {
+                // Safely evaluate poorly formatted BongoJSON
+                let data;
+                try { data = new Function("return " + response.data)(); } catch(e) { return null; }
+                
+                if (data && data.root && data.root[0] && data.root[0][0]) {
+                    const info = data.root[0][0];
+                    let dName = "--", dPhone = "--";
+                    if (info.driver_json) {
+                        try {
+                            const dObj = typeof info.driver_json === 'string' ? JSON.parse(info.driver_json.replace(/'/g, '"')) : info.driver_json;
+                            dName = dObj.name || "--"; dPhone = dObj.mobile_no || "--";
+                        } catch(e){}
+                    }
+                    // Normalize the data perfectly for the frontend
+                    return {
+                        id: bus.id, name: bus.name, 
+                        lat: parseFloat(info.latitude) || 0, lng: parseFloat(info.longitude) || 0,
+                        speed: parseFloat(info.speed) || 0, status: info.sts || "Unknown",
+                        since: info.since || "--", updated: info.data_inserted_time,
+                        driver: dName, phone: dPhone, course: parseInt(info.angle) || 0,
+                        address: info.location || "Moving..."
+                    };
+                }
+            }
+            return null;
+        });
+
+        // Wait for all 26 buses to resolve at exactly the same time
+        const results = await Promise.all(fetchPromises);
+        const cleanData = results.filter(b => b !== null);
+        
+        masterFleetCache = { data: cleanData, timestamp: Date.now() };
+        res.json(cleanData);
+
+    } catch (error) {
+        res.status(500).json({ error: "Batch fetch failed" });
     }
-    if (BUS_CACHE[cacheKey]) return res.json(BUS_CACHE[cacheKey].data);
-    res.json({ error: "Fetch Error" });
-  }
 });
 
 // --- TELEGRAM ALERT ENDPOINT ---
 app.get("/send-alert", async (req, res) => {
   const now = Date.now();
+  if (now - lastAlertTime < 3600000) return res.json({ status: "ignored", reason: "cooldown" });
 
-  // 1. Anti-Spam Check (1 Hour = 3600000 ms)
-  if (now - lastAlertTime < 3600000) {
-    console.log("⚠️ Alert skipped: 1-Hour Cooldown active.");
-    return res.json({ status: "ignored", reason: "cooldown" });
-  }
-
-  // 2. Time Check (Dhaka Time)
   const dhakaTime = new Date(new Date().toLocaleString("en-US", {timeZone: "Asia/Dhaka"}));
-  const h = dhakaTime.getHours();
-  const m = dhakaTime.getMinutes();
+  const h = dhakaTime.getHours(); const m = dhakaTime.getMinutes();
+  const isNight = (h > 21) || (h === 21 && m >= 30) || (h < 6) || (h === 6 && m < 30);
+  
+  if (isNight) return res.json({ status: "ignored", reason: "night_time" });
 
-  // Silence period: 9:00 PM (21:00) to 7:30 AM (07:30)
-  const isNight = (h >= 21) || (h < 7) || (h === 7 && m < 30);
-  if (isNight) {
-    console.log("🌙 Alert skipped: Nighttime silence active.");
-    return res.json({ status: "ignored", reason: "night_time" });
-  }
+  if (!TELEGRAM_BOT_TOKEN) return res.json({status: "error", reason: "No env variable set"});
 
-  // 3. Send Telegram Message
   try {
-    const message = "🚨 BUFT Tracker Alert: 0 active buses detected after 30 seconds! The BongoIOT IDs may have changed, or the system is down.";
+    const message = "🚨 BUFT Tracker Alert: 0 active buses detected after 10 seconds! The BongoIOT IDs may have changed.";
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${encodeURIComponent(message)}`;
-    
     await axios.get(url);
-    lastAlertTime = now; // Start the 1-hour cooldown timer
-    console.log("🚨 Telegram Alert Sent Successfully!");
-    res.json({ status: "success", message: "Alert sent." });
-  } catch (error) {
-    console.error("❌ Telegram Alert Failed:", error.message);
-    res.json({ status: "error", message: "Failed to send alert." });
-  }
+    lastAlertTime = now; 
+    res.json({ status: "success" });
+  } catch (error) { res.json({ status: "error" }); }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server Ready on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Master Backend Ready on port ${PORT}`));
