@@ -46,6 +46,7 @@ const agent = new https.Agent({ rejectUnauthorized: false });
 let CACHED_COOKIE = "";
 let loginPromise = null;
 let masterFleetCache = { data: [], timestamp: 0 };
+let isFetching = false;
 
 async function getCookie() {
   if (CACHED_COOKIE) return CACHED_COOKIE;
@@ -57,6 +58,7 @@ async function getCookie() {
       if (rawCookies) {
         CACHED_COOKIE = rawCookies.map(c => c.split(';')[0]).join('; ');
         setTimeout(() => { CACHED_COOKIE = ""; }, 20 * 60 * 1000); 
+        console.log("✅ BongoIoT Login Successful!");
         return CACHED_COOKIE;
       }
     } catch (e) { return null; } finally { loginPromise = null; }
@@ -64,16 +66,17 @@ async function getCookie() {
   return await loginPromise;
 }
 
-// --- HIGH PERFORMANCE BATCH ENDPOINT ---
-app.get("/fleet", async (req, res) => {
-    const now = Date.now();
-    // Use 4-second cache to prevent server overload
-    if (masterFleetCache.data.length > 0 && (now - masterFleetCache.timestamp < 4000)) {
-        return res.json(masterFleetCache.data);
-    }
+// --- NEW: BACKGROUND WARM-UP ENGINE ---
+// This continuously fetches data in the background so it's always ready instantly.
+async function refreshFleetData() {
+    if (isFetching) return; 
+    isFetching = true;
 
     const cookie = await getCookie();
-    if (!cookie) return res.status(500).json({ error: "Login failed" });
+    if (!cookie) {
+        isFetching = false;
+        return;
+    }
 
     try {
         const fetchPromises = BUSES.map(async (bus) => {
@@ -117,12 +120,30 @@ app.get("/fleet", async (req, res) => {
         const results = await Promise.all(fetchPromises);
         const cleanData = results.filter(b => b !== null);
         
-        masterFleetCache = { data: cleanData, timestamp: Date.now() };
-        res.json(cleanData);
+        // Update the master memory cache
+        if (cleanData.length > 0) {
+            masterFleetCache = { data: cleanData, timestamp: Date.now() };
+        }
 
     } catch (error) {
-        res.status(500).json({ error: "Batch fetch failed" });
+        console.error("Background Fetch Error:", error.message);
+    } finally {
+        isFetching = false;
     }
+}
+
+// Run the engine continuously every 5 seconds (5000ms)
+setInterval(refreshFleetData, 5000);
+
+// --- HIGH PERFORMANCE BATCH ENDPOINT ---
+app.get("/fleet", async (req, res) => {
+    // If it's a cold start and memory is empty, force one fetch immediately
+    if (masterFleetCache.data.length === 0) {
+        await refreshFleetData();
+    }
+    
+    // Instantly return the pre-fetched data from memory
+    res.json(masterFleetCache.data);
 });
 
 // --- TELEGRAM ALERT ENDPOINT ---
@@ -139,7 +160,8 @@ app.get("/send-alert", async (req, res) => {
   if (!TELEGRAM_BOT_TOKEN) return res.json({status: "error", reason: "No token set"});
 
   try {
-    const message = "🚨 BUFT Tracker Alert: 0 active buses detected after 10 seconds! The BongoIOT IDs may have changed.";
+    // Updated text to match the 15-second timer
+    const message = "🚨 BUFT Tracker Alert: 0 active buses detected after 15 seconds! The BongoIOT IDs may have changed.";
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${encodeURIComponent(message)}`;
     await axios.get(url);
     lastAlertTime = now; 
@@ -148,4 +170,7 @@ app.get("/send-alert", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Master Backend Ready on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`🚀 Master Backend Ready on port ${PORT}`);
+    refreshFleetData(); // Trigger the first fetch immediately on boot
+});
