@@ -12,7 +12,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 let lastAlertTime = 0; 
 
-// --- MASTER BUS DATABASE (UPDATED) ---
+// --- MASTER BUS DATABASE ---
 const BUSES = [
     { name: "Bus 01: Islampur", id: "356297", imei: "863051061903687" },
     { name: "Bus 02: Shia Masjid", id: "356300", imei: "863051061866041" },
@@ -48,6 +48,42 @@ let loginPromise = null;
 let masterFleetCache = { data: [], timestamp: 0 };
 let isFetching = false;
 
+// Tracks the last day we scraped (starts at -1 so it runs on boot, BUT only if it's past 7 AM)
+let lastScrapeDate = -1;
+
+// --- AUTO-HEALING SCRAPER ---
+async function scrapeAndUpdateIDs() {
+    try {
+        console.log("🕵️ Checking BUFT portal for new Bus IDs (Morning Scan)...");
+        const res = await axios.get("https://sms.buft.ac.bd/index.php?ctg=tracking", { httpsAgent: agent });
+        const html = res.data;
+        
+        const rowRegex = /<tr>[\s\S]*?<td[^>]*>([\s\S]*?)<\/td>[\s\S]*?<td[^>]*>([\s\S]*?)<\/td>[\s\S]*?param=([a-zA-Z0-9=]+)[\s\S]*?<\/tr>/g;
+        let match;
+        let updatedCount = 0;
+
+        while ((match = rowRegex.exec(html)) !== null) {
+            const busNum = match[2].trim();
+            const base64Param = match[3].trim();
+            const decoded = Buffer.from(base64Param, 'base64').toString('utf-8');
+            const newId = decoded.split('&')[0];
+
+            const busMatchString = busNum.startsWith("BRTC") ? busNum : `Bus ${busNum.padStart(2, '0')}`;
+            const targetBus = BUSES.find(b => b.name.startsWith(busMatchString));
+
+            if (targetBus && newId && targetBus.id !== newId) {
+                console.log(`🔄 Auto-Healed ${targetBus.name}: ${targetBus.id} -> ${newId}`);
+                targetBus.id = newId;
+                updatedCount++;
+            }
+        }
+        if (updatedCount === 0) console.log("✅ All Bus IDs are up to date!");
+    } catch (e) {
+        console.error("❌ Scraper Failed:", e.message);
+    }
+}
+
+// --- AUTH ---
 async function getCookie() {
   if (CACHED_COOKIE) return CACHED_COOKIE;
   if (loginPromise) return await loginPromise;
@@ -66,11 +102,21 @@ async function getCookie() {
   return await loginPromise;
 }
 
-// --- NEW: BACKGROUND WARM-UP ENGINE ---
-// This continuously fetches data in the background so it's always ready instantly.
+// --- BACKGROUND FETCH ENGINE ---
 async function refreshFleetData() {
     if (isFetching) return; 
     isFetching = true;
+
+    // --- DAILY SAFE-TIME SCRAPER CHECK ---
+    const dhakaTime = new Date(new Date().toLocaleString("en-US", {timeZone: "Asia/Dhaka"}));
+    const currentDay = dhakaTime.getDate();
+    const currentHour = dhakaTime.getHours();
+    
+    // Only run the scraper if it is a new day AND the time is 7:00 AM (07) or later.
+    if (currentDay !== lastScrapeDate && currentHour >= 7) {
+        await scrapeAndUpdateIDs();
+        lastScrapeDate = currentDay;
+    }
 
     const cookie = await getCookie();
     if (!cookie) {
@@ -120,7 +166,6 @@ async function refreshFleetData() {
         const results = await Promise.all(fetchPromises);
         const cleanData = results.filter(b => b !== null);
         
-        // Update the master memory cache
         if (cleanData.length > 0) {
             masterFleetCache = { data: cleanData, timestamp: Date.now() };
         }
@@ -132,17 +177,14 @@ async function refreshFleetData() {
     }
 }
 
-// Run the engine continuously every 5 seconds (5000ms)
+// Run the engine continuously every 5 seconds
 setInterval(refreshFleetData, 5000);
 
-// --- HIGH PERFORMANCE BATCH ENDPOINT ---
+// --- FLEET ENDPOINT ---
 app.get("/fleet", async (req, res) => {
-    // If it's a cold start and memory is empty, force one fetch immediately
     if (masterFleetCache.data.length === 0) {
         await refreshFleetData();
     }
-    
-    // Instantly return the pre-fetched data from memory
     res.json(masterFleetCache.data);
 });
 
@@ -153,15 +195,16 @@ app.get("/send-alert", async (req, res) => {
 
   const dhakaTime = new Date(new Date().toLocaleString("en-US", {timeZone: "Asia/Dhaka"}));
   const h = dhakaTime.getHours(); const m = dhakaTime.getMinutes();
-  const isNight = (h > 21) || (h === 21 && m >= 30) || (h < 6) || (h === 6 && m < 30);
+  
+  // Paused from 9:30 PM to 7:00 AM (07:00)
+  const isNight = (h > 21) || (h === 21 && m >= 30) || (h < 7);
   
   if (isNight) return res.json({ status: "ignored", reason: "night_time" });
 
   if (!TELEGRAM_BOT_TOKEN) return res.json({status: "error", reason: "No token set"});
 
   try {
-    // Updated text to match the 15-second timer
-    const message = "🚨 BUFT Tracker Alert: 0 active buses detected after 15 seconds! The BongoIOT IDs may have changed.";
+    const message = "🚨 BUFT Tracker Alert: 0 active buses detected! The server might be asleep or BongoIOT is down.";
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${encodeURIComponent(message)}`;
     await axios.get(url);
     lastAlertTime = now; 
@@ -172,5 +215,5 @@ app.get("/send-alert", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 Master Backend Ready on port ${PORT}`);
-    refreshFleetData(); // Trigger the first fetch immediately on boot
+    refreshFleetData(); 
 });
