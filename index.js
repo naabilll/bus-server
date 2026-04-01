@@ -12,34 +12,34 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 let lastAlertTime = 0; 
 
-// --- MASTER BUS DATABASE (HIDDEN FROM PUBLIC) ---
+// --- MASTER BUS DATABASE (UPDATED) ---
 const BUSES = [
-    { name: "Bus 1: Islampur", id: "351072", imei: "863051061903687" },
-    { name: "Bus 2: Shia Masjid", id: "351073", imei: "863051061866041" },
-    { name: "Bus 3: Azampur", id: "351074", imei: "863051061865993" },
-    { name: "Bus 4: Azampur", id: "351075", imei: "863051061875091" },
-    { name: "Bus 5: Pubail", id: "351076", imei: "863051061778279" },
-    { name: "Bus 6: Girls Hostel", id: "351077", imei: "863051061741285" },
-    { name: "Bus 7: Stop", id: "351079", imei: "863051061737937" },
-    { name: "Bus 8: Azampur", id: "351080", imei: "863051062003073" },
-    { name: "Bus 9: Rampura", id: "351081", imei: "863051062002752" },
-    { name: "Bus 10: Azampur", id: "351082", imei: "863051062003610" },
-    { name: "Bus 11: Kalshi", id: "351083", imei: "863051061786785" },
-    { name: "Bus 12: Tongi", id: "351084", imei: "863051061778220" },
-    { name: "Bus 13: Zirani", id: "351085", imei: "863051062002935" },
-    { name: "Bus 14: Kamlapur", id: "351086", imei: "863051061866694" },
-    { name: "Bus 15: Shibbari", id: "351087", imei: "868184062272516" },
-    { name: "Bus 16: Mirpur-10", id: "351088", imei: "863051061741137" },
-    { name: "Bus 17: Commerce", id: "351089", imei: "868184062144723" },
-    { name: "Bus 18: Pallibiduth", id: "351090", imei: "863051061982632" },
-    { name: "Bus 23: Gulistan", id: "351091", imei: "863051062003990" },
-    { name: "Bus 24: Mirpur-14", id: "351092", imei: "863051061998133" },
-    { name: "Bus 25: Newmarket", id: "351650", imei: "863051061775770" },
-    { name: "Bus 26: Shafipur", id: "351093", imei: "863051061778014" },
-    { name: "BRTC 01", id: "351094", imei: "863051061867940" },
-    { name: "BRTC 02", id: "351095", imei: "863051062002919" },
-    { name: "BRTC 03", id: "351096", imei: "863051061786629" },
-    { name: "BRTC 04", id: "351097", imei: "863051061998075" }
+    { name: "Bus 01: Islampur", id: "356297", imei: "863051061903687" },
+    { name: "Bus 02: Shia Masjid", id: "356300", imei: "863051061866041" },
+    { name: "Bus 03: Azampur", id: "356302", imei: "863051061865993" },
+    { name: "Bus 04: Azampur", id: "356305", imei: "863051061875091" },
+    { name: "Bus 05: Pubail", id: "356307", imei: "863051061778279" },
+    { name: "Bus 06: Girls Hostel", id: "356308", imei: "863051061741285" },
+    { name: "Bus 07: Rampura", id: "356309", imei: "863051061737937" },
+    { name: "Bus 08: Azampur", id: "356310", imei: "863051062003073" },
+    { name: "Bus 09: Azampur", id: "356311", imei: "863051062002752" },
+    { name: "Bus 10: Stop", id: "356312", imei: "863051062003610" },
+    { name: "Bus 11: Newmarket", id: "356313", imei: "863051061786785" },
+    { name: "Bus 12: Kalshi", id: "356314", imei: "863051061778220" },
+    { name: "Bus 13: Polli Bidut", id: "356315", imei: "863051062002935" },
+    { name: "Bus 14: Tongi", id: "356316", imei: "863051061866694" },
+    { name: "Bus 15: Shibbari", id: "356317", imei: "868184062272516" },
+    { name: "Bus 16: Kamlapur", id: "356318", imei: "863051061741137" },
+    { name: "Bus 17: Mirpur-10", id: "356319", imei: "868184062144723" },
+    { name: "Bus 18: Baipail", id: "356320", imei: "863051061982632" },
+    { name: "Bus 23: Commerce", id: "356322", imei: "863051062003990" },
+    { name: "Bus 24: Gulistan", id: "356323", imei: "863051061998133" },
+    { name: "Bus 25: Mirpur-14", id: "356327", imei: "863051061775770" },
+    { name: "Bus 26: Shafipur", id: "356328", imei: "863051061778014" },
+    { name: "BRTC 01", id: "356329", imei: "863051061867940" },
+    { name: "BRTC 02", id: "356330", imei: "863051062002919" },
+    { name: "BRTC 03", id: "356331", imei: "863051061786629" },
+    { name: "BRTC 04", id: "356332", imei: "863051061998075" }
 ];
 
 const agent = new https.Agent({ rejectUnauthorized: false });
