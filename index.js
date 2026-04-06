@@ -51,10 +51,18 @@ let isFetching = false;
 // Tracks the last day we scraped (starts at -1 so it runs on boot, BUT only if it's past 7 AM)
 let lastScrapeDate = -1;
 
-// --- AUTO-HEALING SCRAPER ---
+// --- HELPER: FORMAT ROUTE NAME (Title Case) ---
+function formatRouteName(str) {
+    let titleCased = str.toLowerCase().split(' ').map(word => {
+        return word.charAt(0).toUpperCase() + word.slice(1);
+    }).join(' ');
+    return titleCased.replace(/\(\s+/g, '(').replace(/\s+\)/g, ')');
+}
+
+// --- AUTO-HEALING SCRAPER (Names & IDs) ---
 async function scrapeAndUpdateIDs() {
     try {
-        console.log("🕵️ Checking BUFT portal for new Bus IDs (Morning Scan)...");
+        console.log("🕵️ Checking BUFT portal for new Bus IDs and Routes (Morning Scan)...");
         const res = await axios.get("https://sms.buft.ac.bd/index.php?ctg=tracking", { httpsAgent: agent });
         const html = res.data;
         
@@ -63,21 +71,39 @@ async function scrapeAndUpdateIDs() {
         let updatedCount = 0;
 
         while ((match = rowRegex.exec(html)) !== null) {
+            const rawRoute = match[1].trim();
             const busNum = match[2].trim();
             const base64Param = match[3].trim();
+            
             const decoded = Buffer.from(base64Param, 'base64').toString('utf-8');
             const newId = decoded.split('&')[0];
 
+            const formattedRoute = formatRouteName(rawRoute);
             const busMatchString = busNum.startsWith("BRTC") ? busNum : `Bus ${busNum.padStart(2, '0')}`;
+            const newFullName = `${busMatchString}: ${formattedRoute}`;
+
             const targetBus = BUSES.find(b => b.name.startsWith(busMatchString));
 
-            if (targetBus && newId && targetBus.id !== newId) {
-                console.log(`🔄 Auto-Healed ${targetBus.name}: ${targetBus.id} -> ${newId}`);
-                targetBus.id = newId;
-                updatedCount++;
+            if (targetBus && newId) {
+                let changed = false;
+                
+                if (targetBus.id !== newId) {
+                    targetBus.id = newId;
+                    changed = true;
+                }
+                
+                if (targetBus.name !== newFullName) {
+                    targetBus.name = newFullName;
+                    changed = true;
+                }
+
+                if (changed) {
+                    console.log(`🔄 Auto-Healed -> Name: "${targetBus.name}" | ID: ${targetBus.id}`);
+                    updatedCount++;
+                }
             }
         }
-        if (updatedCount === 0) console.log("✅ All Bus IDs are up to date!");
+        if (updatedCount === 0) console.log("✅ All Bus Routes & IDs are up to date!");
     } catch (e) {
         console.error("❌ Scraper Failed:", e.message);
     }
