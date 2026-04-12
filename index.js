@@ -6,6 +6,7 @@ const { URLSearchParams } = require("url");
 
 const app = express();
 app.use(cors());
+app.use(express.json()); // Added to read JSON from frontend
 
 // --- SECURE TELEGRAM CONFIG ---
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -47,11 +48,15 @@ let CACHED_COOKIE = "";
 let loginPromise = null;
 let masterFleetCache = { data: [], timestamp: 0 };
 let isFetching = false;
-
-// Tracks the last day we scraped (starts at -1 so it runs on boot, BUT only if it's past 7 AM)
 let lastScrapeDate = -1;
 
-// --- HELPER: FORMAT ROUTE NAME (Title Case) ---
+// --- CAPACITY TRACKING MEMORY ---
+// Format: { "356297": { voters: ["id1", "id2"], timestamp: 1710000000 } }
+let capacityCache = {}; 
+const BUFT_LAT = 23.8741;
+const BUFT_LNG = 90.3992;
+
+// --- HELPER: FORMAT ROUTE NAME ---
 function formatRouteName(str) {
     let titleCased = str.toLowerCase().split(' ').map(word => {
         return word.charAt(0).toUpperCase() + word.slice(1);
@@ -59,54 +64,38 @@ function formatRouteName(str) {
     return titleCased.replace(/\(\s+/g, '(').replace(/\s+\)/g, ')');
 }
 
-// --- AUTO-HEALING SCRAPER (Names & IDs) ---
+// --- HELPER: CALCULATE GPS DISTANCE (Haversine in km) ---
+function getDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371; 
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
+}
+
+// --- AUTO-HEALING SCRAPER ---
 async function scrapeAndUpdateIDs() {
     try {
-        console.log("🕵️ Checking BUFT portal for new Bus IDs and Routes (Morning Scan)...");
+        console.log("🕵️ Checking BUFT portal for new Bus IDs and Routes...");
         const res = await axios.get("https://sms.buft.ac.bd/index.php?ctg=tracking", { httpsAgent: agent });
         const html = res.data;
-        
         const rowRegex = /<tr>[\s\S]*?<td[^>]*>([\s\S]*?)<\/td>[\s\S]*?<td[^>]*>([\s\S]*?)<\/td>[\s\S]*?param=([a-zA-Z0-9=]+)[\s\S]*?<\/tr>/g;
         let match;
-        let updatedCount = 0;
-
         while ((match = rowRegex.exec(html)) !== null) {
             const rawRoute = match[1].trim();
             const busNum = match[2].trim();
-            const base64Param = match[3].trim();
-            
-            const decoded = Buffer.from(base64Param, 'base64').toString('utf-8');
+            const decoded = Buffer.from(match[3].trim(), 'base64').toString('utf-8');
             const newId = decoded.split('&')[0];
-
-            const formattedRoute = formatRouteName(rawRoute);
             const busMatchString = busNum.startsWith("BRTC") ? busNum : `Bus ${busNum.padStart(2, '0')}`;
-            const newFullName = `${busMatchString}: ${formattedRoute}`;
-
             const targetBus = BUSES.find(b => b.name.startsWith(busMatchString));
-
             if (targetBus && newId) {
-                let changed = false;
-                
-                if (targetBus.id !== newId) {
-                    targetBus.id = newId;
-                    changed = true;
-                }
-                
-                if (targetBus.name !== newFullName) {
-                    targetBus.name = newFullName;
-                    changed = true;
-                }
-
-                if (changed) {
-                    console.log(`🔄 Auto-Healed -> Name: "${targetBus.name}" | ID: ${targetBus.id}`);
-                    updatedCount++;
-                }
+                targetBus.id = newId;
+                targetBus.name = `${busMatchString}: ${formatRouteName(rawRoute)}`;
             }
         }
-        if (updatedCount === 0) console.log("✅ All Bus Routes & IDs are up to date!");
-    } catch (e) {
-        console.error("❌ Scraper Failed:", e.message);
-    }
+    } catch (e) { console.error("❌ Scraper Failed:", e.message); }
 }
 
 // --- AUTH ---
@@ -120,7 +109,6 @@ async function getCookie() {
       if (rawCookies) {
         CACHED_COOKIE = rawCookies.map(c => c.split(';')[0]).join('; ');
         setTimeout(() => { CACHED_COOKIE = ""; }, 20 * 60 * 1000); 
-        console.log("✅ BongoIoT Login Successful!");
         return CACHED_COOKIE;
       }
     } catch (e) { return null; } finally { loginPromise = null; }
@@ -133,22 +121,14 @@ async function refreshFleetData() {
     if (isFetching) return; 
     isFetching = true;
 
-    // --- DAILY SAFE-TIME SCRAPER CHECK ---
     const dhakaTime = new Date(new Date().toLocaleString("en-US", {timeZone: "Asia/Dhaka"}));
-    const currentDay = dhakaTime.getDate();
-    const currentHour = dhakaTime.getHours();
-    
-    // Only run the scraper if it is a new day AND the time is 7:00 AM (07) or later.
-    if (currentDay !== lastScrapeDate && currentHour >= 7) {
+    if (dhakaTime.getDate() !== lastScrapeDate && dhakaTime.getHours() >= 7) {
         await scrapeAndUpdateIDs();
-        lastScrapeDate = currentDay;
+        lastScrapeDate = dhakaTime.getDate();
     }
 
     const cookie = await getCookie();
-    if (!cookie) {
-        isFetching = false;
-        return;
-    }
+    if (!cookie) { isFetching = false; return; }
 
     try {
         const fetchPromises = BUSES.map(async (bus) => {
@@ -166,7 +146,6 @@ async function refreshFleetData() {
             if (typeof response.data === 'string') {
                 let data;
                 try { data = new Function("return " + response.data)(); } catch(e) { return null; }
-                
                 if (data && data.root && data.root[0] && data.root[0][0]) {
                     const info = data.root[0][0];
                     let dName = "--", dPhone = "--";
@@ -193,48 +172,86 @@ async function refreshFleetData() {
         const cleanData = results.filter(b => b !== null);
         
         if (cleanData.length > 0) {
-            masterFleetCache = { data: cleanData, timestamp: Date.now() };
+            // MERGE CAPACITY DATA & RUN RESETS
+            const now = Date.now();
+            masterFleetCache.data = cleanData.map(bus => {
+                let capStatus = "Normal";
+                const busMemory = capacityCache[bus.id];
+                
+                if (busMemory) {
+                    // Check Auto-Resets: 40 minutes passed OR within 300m of BUFT
+                    const timePassed = now - busMemory.timestamp;
+                    const distToCampus = getDistance(bus.lat, bus.lng, BUFT_LAT, BUFT_LNG);
+                    
+                    if (timePassed > (40 * 60 * 1000) || distToCampus < 0.3) {
+                        delete capacityCache[bus.id]; // Wipe it clean
+                    } else {
+                        // Assign status based on votes
+                        if (busMemory.voters.length >= 2) capStatus = "Full";
+                        else if (busMemory.voters.length === 1) capStatus = "Maybe Full";
+                    }
+                }
+                return { ...bus, capacityStatus: capStatus };
+            });
+            masterFleetCache.timestamp = now;
         }
 
-    } catch (error) {
-        console.error("Background Fetch Error:", error.message);
-    } finally {
-        isFetching = false;
-    }
+    } catch (error) { console.error("Fetch Error:", error.message); } 
+    finally { isFetching = false; }
 }
 
-// Run the engine continuously every 5 seconds
-setInterval(refreshFleetData, 5000);
+setInterval(refreshFleetData, 5000); // Kept exactly at 5 seconds per your instruction
 
 // --- FLEET ENDPOINT ---
 app.get("/fleet", async (req, res) => {
-    if (masterFleetCache.data.length === 0) {
-        await refreshFleetData();
-    }
+    if (masterFleetCache.data.length === 0) await refreshFleetData();
     res.json(masterFleetCache.data);
+});
+
+// --- NEW ENDPOINT: REPORT BUS CAPACITY ---
+app.post("/report-capacity", (req, res) => {
+    const { busId, userLat, userLng, userId } = req.body;
+    
+    // Find the bus's current live location from our cache
+    const bus = masterFleetCache.data.find(b => b.id === busId);
+    if (!bus) return res.json({ success: false, message: "Bus not found." });
+    
+    // Distance verification (Must be within ~200 meters / 0.2 km)
+    const dist = getDistance(userLat, userLng, bus.lat, bus.lng);
+    if (dist > 0.2) {
+        return res.json({ success: false, message: "You are too far from the bus to report its capacity. You must be on or near the bus." });
+    }
+
+    // Initialize memory if first time
+    if (!capacityCache[busId]) {
+        capacityCache[busId] = { voters: [], timestamp: Date.now() };
+    }
+
+    // Check if this user already voted
+    if (capacityCache[busId].voters.includes(userId)) {
+        return res.json({ success: false, message: "You have already reported this bus!" });
+    }
+
+    // Add vote and refresh timestamp
+    capacityCache[busId].voters.push(userId);
+    capacityCache[busId].timestamp = Date.now();
+
+    res.json({ success: true, message: "Report confirmed! Thank you." });
 });
 
 // --- TELEGRAM ALERT ENDPOINT ---
 app.get("/send-alert", async (req, res) => {
   const now = Date.now();
   if (now - lastAlertTime < 3600000) return res.json({ status: "ignored", reason: "cooldown" });
-
   const dhakaTime = new Date(new Date().toLocaleString("en-US", {timeZone: "Asia/Dhaka"}));
   const h = dhakaTime.getHours(); const m = dhakaTime.getMinutes();
-  
-  // Paused from 9:30 PM to 7:00 AM (07:00)
-  const isNight = (h > 21) || (h === 21 && m >= 30) || (h < 7);
-  
-  if (isNight) return res.json({ status: "ignored", reason: "night_time" });
-
-  if (!TELEGRAM_BOT_TOKEN) return res.json({status: "error", reason: "No token set"});
+  if ((h > 21) || (h === 21 && m >= 30) || (h < 7)) return res.json({ status: "ignored", reason: "night" });
+  if (!TELEGRAM_BOT_TOKEN) return res.json({status: "error"});
 
   try {
-    const message = "🚨 BUFT Tracker Alert: 0 active buses detected! The server might be asleep or BongoIOT is down.";
+    const message = "🚨 BUFT Tracker Alert: 0 active buses detected!";
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${encodeURIComponent(message)}`;
-    await axios.get(url);
-    lastAlertTime = now; 
-    res.json({ status: "success" });
+    await axios.get(url); lastAlertTime = now; res.json({ status: "success" });
   } catch (error) { res.json({ status: "error" }); }
 });
 
