@@ -6,7 +6,7 @@ const { URLSearchParams } = require("url");
 
 const app = express();
 app.use(cors());
-app.use(express.json()); // Added to read JSON from frontend
+app.use(express.json()); 
 
 // --- SECURE TELEGRAM CONFIG ---
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -50,8 +50,8 @@ let masterFleetCache = { data: [], timestamp: 0 };
 let isFetching = false;
 let lastScrapeDate = -1;
 
-// --- CAPACITY TRACKING MEMORY ---
-// Format: { "356297": { voters: ["id1", "id2"], timestamp: 1710000000 } }
+// --- DYNAMIC CAPACITY TRACKING MEMORY ---
+// Format: { "356297": { votes: { "user_id_1": 1, "user_id_2": -1 }, timestamp: 1710000000 } }
 let capacityCache = {}; 
 const BUFT_LAT = 23.8741;
 const BUFT_LNG = 90.3992;
@@ -179,16 +179,22 @@ async function refreshFleetData() {
                 const busMemory = capacityCache[bus.id];
                 
                 if (busMemory) {
-                    // Check Auto-Resets: 40 minutes passed OR within 300m of BUFT
+                    // Check Auto-Resets: 40 minutes passed OR within 300m of BUFT Campus
                     const timePassed = now - busMemory.timestamp;
                     const distToCampus = getDistance(bus.lat, bus.lng, BUFT_LAT, BUFT_LNG);
                     
                     if (timePassed > (40 * 60 * 1000) || distToCampus < 0.3) {
-                        delete capacityCache[bus.id]; // Wipe it clean
+                        delete capacityCache[bus.id]; // Wipe memory clean
                     } else {
-                        // Assign status based on votes
-                        if (busMemory.voters.length >= 2) capStatus = "Full";
-                        else if (busMemory.voters.length === 1) capStatus = "Maybe Full";
+                        // Calculate final consensus score (Full = +1, Not Full = -1)
+                        let score = 0;
+                        for (let uid in busMemory.votes) {
+                            score += busMemory.votes[uid];
+                        }
+                        
+                        if (score >= 2) capStatus = "Full";
+                        else if (score === 1) capStatus = "Maybe Full"; 
+                        else capStatus = "Normal"; // Dropped back to 0 or negative
                     }
                 }
                 return { ...bus, capacityStatus: capStatus };
@@ -200,7 +206,7 @@ async function refreshFleetData() {
     finally { isFetching = false; }
 }
 
-setInterval(refreshFleetData, 5000); // Kept exactly at 5 seconds per your instruction
+setInterval(refreshFleetData, 5000);
 
 // --- FLEET ENDPOINT ---
 app.get("/fleet", async (req, res) => {
@@ -208,32 +214,35 @@ app.get("/fleet", async (req, res) => {
     res.json(masterFleetCache.data);
 });
 
-// --- NEW ENDPOINT: REPORT BUS CAPACITY ---
+// --- NEW ENDPOINT: CROWDSOURCED CAPACITY REPORTING ---
 app.post("/report-capacity", (req, res) => {
-    const { busId, userLat, userLng, userId } = req.body;
+    const { busId, userLat, userLng, userId, voteType } = req.body;
     
-    // Find the bus's current live location from our cache
     const bus = masterFleetCache.data.find(b => b.id === busId);
     if (!bus) return res.json({ success: false, message: "Bus not found." });
     
-    // Distance verification (Must be within ~200 meters / 0.2 km)
+    // Geofence verification (Must be within ~200 meters / 0.2 km)
     const dist = getDistance(userLat, userLng, bus.lat, bus.lng);
     if (dist > 0.2) {
         return res.json({ success: false, message: "You are too far from the bus to report its capacity. You must be on or near the bus." });
     }
 
-    // Initialize memory if first time
+    // Initialize memory block for this bus if it doesn't exist
     if (!capacityCache[busId]) {
-        capacityCache[busId] = { voters: [], timestamp: Date.now() };
+        capacityCache[busId] = { votes: {}, timestamp: Date.now() };
     }
 
-    // Check if this user already voted
-    if (capacityCache[busId].voters.includes(userId)) {
-        return res.json({ success: false, message: "You have already reported this bus!" });
+    // Assign numeric value (+1 for Full, -1 for Not Full)
+    const newVoteVal = voteType === 'full' ? 1 : -1;
+    const currentVote = capacityCache[busId].votes[userId];
+
+    // Check if the user is submitting the exact same report twice
+    if (currentVote === newVoteVal) {
+        return res.json({ success: false, message: "You have already submitted this exact report!" });
     }
 
-    // Add vote and refresh timestamp
-    capacityCache[busId].voters.push(userId);
+    // Register/Overwrite their vote and reset the 40-minute expiration timer
+    capacityCache[busId].votes[userId] = newVoteVal;
     capacityCache[busId].timestamp = Date.now();
 
     res.json({ success: true, message: "Report confirmed! Thank you." });
